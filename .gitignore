@@ -1,0 +1,16 @@
+# dependencies
+node_modules/
+.pnpm-store/
+
+# local artifacts
+*.log
+tmp/
+.tmp/
+.cache/
+
+# editors / OS
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp

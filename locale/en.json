@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Live Reload",
+    "description": "Hot-reload DSH plugins without restarting the desktop app: watch plugin sources, reload host-side modules, and refresh the Web UI."
+  }
+}

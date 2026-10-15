@@ -1,0 +1,38 @@
+# ============================================================================
+# dsh-live-reload —— DSH bundle patch
+# ============================================================================
+# 免重启热刷新：监视插件源码目录，磁盘一变就重新加载 host 侧插件模块
+# （绕开 Node ESM 缓存），并通知 Web 界面刷新，从而不必重启 DSH 桌面端。
+#
+# 安装：
+#   dsh plugin --profile desktop add link:<本目录绝对路径>
+# 装好后**需要重启一次**让本插件自己生效；此后其它插件的改动都不再需要重启。
+#
+# 配置项（全部可省略，省略即使用默认值）：
+#   watch              额外监视的目录（绝对路径数组）；默认自动发现 profile 里用
+#                      link: 装入的插件目录（含本插件自身目录）
+#   exclude            从监视列表里排除的目录（绝对路径数组）
+#   autoWatch          是否自动监视（true 默认）；false 时只响应工具/服务的手动调用
+#   reloadSelf         是否允许热重载本插件自己（false 默认；改本插件代码时建议手动重启）
+#   pollMs             扫描磁盘指纹的间隔毫秒数；默认 700（150–60000）
+#   debounceMs         变更去抖毫秒数；默认 300（50–10000）
+#   maxFiles           单个目录最多扫描多少文件；默认 5000
+#   maxReloads         单次批处理里最多重载的插件数；默认 20
+#   reloadTargets      只热重载名字/目录命中这些子串的插件；默认全部
+#   ignore             额外忽略的文件/目录片段数组（在默认列表之上追加）
+#   refreshUi          'auto'|'idle'（默认，空闲时自动刷新）/ 'always' / 'manual' / 'never'
+#   uiPath             界面轮询端点路径；默认 /__dsh-live-reload
+#   uiPollMs           浏览器轮询间隔毫秒数；默认 1500（500–60000）
+#
+# 覆盖示例（把某个插件排除在热重载之外、并加快扫描）：
+#   - id: dsh-live-reload
+#     name: dsh-live-reload
+#     config:
+#       pollMs: 400
+#       exclude:
+#         - D:/test-dsh/experiments/lr-victim
+# ============================================================================
+
+- insert:
+    - id: dsh-live-reload
+      name: dsh-live-reload
