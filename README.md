@@ -1,11 +1,12 @@
 # dsh-live-reload
 
-让 **DSH 桌面端不重启就能生效**：插件源码一变，host 侧插件模块立刻重新加载；有 Web 界面时页面会收到刷新提示。
+让 **DSH 不重启就能生效**：插件源码一变，host 侧插件模块立刻重新加载；会话标题栏右侧还有一颗「刷新界面」按钮，点一下就把浏览器里的旧页面换成新的。
 
-装好本插件并重启一次之后，**其它插件**的改动都不再需要重启 DSH —— 改完代码 1 秒内自动生效，界面自动刷新（可配置）。
+装好本插件并重启一次之后，**其它插件**的改动都不再需要重启 DSH —— 改完代码 1 秒内自动生效，页面点一下按钮（或按策略自动）刷新。
 
-- 零依赖（只用 Node 内置模块）
-- 只用宿主公开契约（`ctx.tools` / `loader` / `webServer` / `ctx.provide`）
+- 零依赖、零构建（host 半边与浏览器半边都是手写 CommonJS/ESM）
+- 只用宿主公开契约（`ctx.tools` / `loader` / `webServer` / `ctx.slots` / `ctx.provide`）
+- 兼容 **DSH 0.2.1**（`engines.dsh: >=0.2.1-rc.1`）
 - 监视走轮询而不是 `fs.watch`（见下文「为什么不用 fs.watch」）
 
 ---
@@ -15,13 +16,14 @@
 | 能力 | 说明 |
 | --- | --- |
 | 热重载 host 插件模块 | 监视 profile 里用 `link:` 装入的插件目录，磁盘一变就重新 import 对应模块并重新 `apply`，等价于宿主内置 HMR 的那套「清缓存 → 重 import → 换 registry 绑定」 |
-| 界面刷新 | 通过 `/__dsh-live-reload/state` 让页面知道有插件更新了；`auto`/`idle` 模式下页面空闲时自动 `location.reload()`，忙时弹「插件已热更新：…／立即刷新」胶囊，不会打断正在输入的对话 |
-| 工具入口 | 工具 `live_reload`：`status` / `check` / `reload` / `start` / `stop` / `roots` |
+| 刷新按钮（浏览器半边） | 注册到会话标题栏右侧（`conversation.session.header.utilities`）的 28×28 图标按钮：点击 → 先让 host 比对一次磁盘并热重载 → `location.reload()`。Shift / Alt + 点击 = 只刷新页面、不做检查 |
+| 更新提示 | 按钮常驻轮询 `/__dsh-live-reload/state`；`rev` 变了就在按钮右上角点一颗品牌色小圆点（`refreshUi: auto` 且用户空闲时自动刷新，忙时不打断输入） |
+| 工具入口 | 工具 `live_reload`：`status` / `check` / `reload` / `start` / `stop` / `roots` / `cache` |
 | 服务入口 | 服务 `liveReload`，供其它插件订阅 `onChange` 或主动触发重载 |
 
 **边界**（务必先读）：
 
-- 只管 **host 半边**（Node 里跑的插件模块）。浏览器半边的 bundle 由宿主自己的 client-hmr 负责，本插件的做法是「提示页面刷新」。
+- 管 **host 半边**（Node 里跑的插件模块）+ **一颗页面刷新按钮**。浏览器 bundle 的替换由宿主自己的 client-modules 负责，本插件负责让页面重新拉取它。
 - 只管 **`link:` 装入的插件目录**（开发/自研插件正是这种）。DSH 自带的插件在 `app.asar` 里，不在监视范围。
 - 默认**不重载自己**（`reloadSelf: false`）：改本插件源码时请手动重启一次，避免自己把自己换掉。
 - 不会把 `disabled` 的插件顶起来：自动路径按「只重载本来就在跑的 entry」处理；显式 `action=reload` 才允许强制。
@@ -35,7 +37,7 @@ dsh plugin --profile desktop add link:D:/path/to/dsh-live-reload
 
 或者直接用插件管理器：`plugin_manager action=install_bundle target=<插件目录绝对路径>`。
 
-装完 **重启一次 DSH**（让本插件自己先跑起来）。此后改别的插件 → 不用重启。
+装完 **重启一次 DSH**（让本插件自己先跑起来）。此后改别的插件 → 不用重启；页面按一次刷新按钮即可。
 
 ## 3. 工具 `live_reload`
 
@@ -66,7 +68,8 @@ live_reload( action = "reload", target = "dsh-image-insight" )
     debounceMs: 300          # 变更去抖，默认 300ms（50–10000）
     autoWatch: true          # 是否自动监视
     reloadSelf: false        # 是否允许热重载本插件
-    refreshUi: idle          # auto|idle|always|manual|never
+    refreshUi: auto          # auto|always|manual|never（auto=空闲时自动刷新）
+    uiPollMs: 1500           # 按钮轮询 /state 的间隔（500–60000）
     watch:                   # 额外监视的目录（绝对路径）
       - D:/test-dsh/experiments/lr-victim
     exclude:                 # 排除的目录
@@ -92,11 +95,22 @@ live.roots();                                  // 监视目录数组
 
 ## 6. 界面刷新怎么工作
 
-- 插件用 `webServer.register({ kind: 'prefix', path: '/__dsh-live-reload' })` 挂了两个端点：
-  - `GET /__dsh-live-reload/state` → `{ rev, at, items, startedAt, roots }`（几十字节 JSON，`no-store`）
-  - `GET /__dsh-live-reload/reload` → 触发一次手动重载
-- 同时用 `webServer.tapIndex()` 往 index.html 注入一段脚本：轮询 `/state`，`rev` 变了就按 `refreshUi` 策略刷新或提示。
-- 为什么是轮询而不是 SSE/WebSocket：几十字节的 JSON 最不容易被代理、休眠、页面隐藏打断，断线自动恢复，也不需要重连状态机。
+两个半边各司其职：
+
+**host 半边**（`lib/index.js`，延迟注入 webServer）：
+
+- `ctx.inject(['webServer'], (sub) => sub.effect(() => webServer.register(...)))` —— 0.2.x 里 `apply` 阶段拿不到 `webServer`（提供者 fiber 还没 ACTIVE），必须等依赖就绪；不 `inject` 声明只 `ctx.get()` 会静默失败（旧 0.1.0 就是这么 404 的）。
+- `GET /__dsh-live-reload/state` → `{ rev, at, items, startedAt, roots, stats, ui }`（几十字节 JSON，`no-store`）
+- `GET /__dsh-live-reload/check` → 先比对磁盘、必要时热重载，再返回结果（按钮点击时调用）
+- `GET /__dsh-live-reload/reload` → 强制重载一次
+
+**浏览器半边**（`lib/client.js`，手写 lazy-CJS，`dsh.client.immediately: true`）：
+
+- `ctx.slots.inject('conversation.session.header.utilities', …)` 注册 `dsh-live-reload:refresh`（`order: 30`，排在 better-sidebar 的 10/20 之后）。
+- 组件自己轮询 `/state`；`rev` 变化 → 按钮变品牌色 + 小圆点；`refreshUi: auto` 且当前焦点不在输入框 → 600ms 后自动 `location.reload()`。
+- 为什么刷新要由页面发起：0.2.x 全库没有 `location.reload()`，宿主只能通过 SSE 通知「这个 bundle 换了」，页面自己决定何时换。
+
+> 为什么不往 index.html 注入脚本：桌面壳的 `index.html` 由安装包静态 dist 直出，`tapIndex` 不参与渲染；`webserver/index-inject` 的结构化行只在宿主启动时收集一次、之后没有刷新路径。client half 才是 0.2.x 的正式通道。
 
 ## 7. 实现要点（为什么这么写）
 
@@ -121,18 +135,22 @@ live.roots();                                  // 监视目录数组
    （`rolledBack: true`）。
 5. **为什么不用 `fs.watch`**：Windows 上编辑器普遍「写临时文件 → 改名覆盖」，`fs.watch` 经常漏事件；漏一次就等于
    改了代码不生效。插件源码目录很小（默认最多 5000 文件），700ms 扫一次指纹的开销可以忽略。
-6. **不 `inject: ['webServer']`**：headless profile 没有 webServer 服务，硬注入会让插件在 headless 里起不来；
-   改成可选获取（`ctx.get('webServer', false)`），没有就只跑 host 半边。
+6. **webServer 用延迟注入、不写进 `inject` 数组**：headless profile 没有 webServer 服务，硬注入会让插件在
+   headless 里起不来；`ctx.inject(['webServer'], …)` 既能等到服务就绪，又能在没有该服务的 profile 里继续跑 host 半边。
+7. **浏览器半边手写而不是打包**：`lib/client.js` 就是 `window.__ModuleLoader__.load({id, factory})` 的产物，
+   零依赖、零构建；`dsh.client.immediately` 必须为 `true`，否则惰性模块表只「提供」不执行。
 
 ## 8. 自测
 
 ```powershell
-node tests/selftest.mjs      # 23 例：忽略/指纹/差异、根发现、重载内核调用顺序、轮询、界面脚本
-node tests/integration.mjs   # 18 例：假宿主 apply → 工具 → 改动 → 重载 → 界面端点 → 服务通知
+node tests/selftest.mjs      # 29 例：忽略/指纹/差异、根发现、重载内核调用顺序、轮询、端点尾段、client half
+node tests/integration.mjs   # 21 例：假宿主 apply → 工具 → 改动 → 重载 → 延迟注入路由 → 服务通知
 ```
 
 integration 用的假宿主完整复刻了宿主的「无损 JSON 快照 + schema 严格校验 + render 必须返回
 ContentBlock[] + presentResult 必须返回视图」，因此 schema 写错、字段漏声明都会被测出来。
+`client half` 的用例会在 `node:vm` 里真的执行 `lib/client.js`，用假 `window.__ModuleLoader__` 与假 React
+把按钮渲染出来（`data-dsh-live-reload="refresh"`）。
 
 ## 9. 排错
 
@@ -144,11 +162,13 @@ ContentBlock[] + presentResult 必须返回视图」，因此 schema 写错、�
 | `reloaded[].mode = "none"` | 既没清掉缓存，也无法把模块名解析成文件（`dsh plugin add link:` 未装好或包名不对）；此时**没有**换代码 |
 | `reloaded[].reason = "import-failed"` | 新代码有语法/导入错误，旧插件仍在运行（先修好语法） |
 | `reloaded[].reason = "entry-not-loaded"` | 该插件当前没在运行（被禁用或未加载），自动路径会跳过 |
-| 界面没刷新 | 桌面 profile 有 `webServer` 才会注入；`refreshUi: manual` 时只在有更新时弹提示，需手动点「立即刷新」 |
+| 看不到刷新按钮 | 按钮挂在**会话标题栏右侧**——没打开会话时没有这个槽位；另外确认 `package.json` 里 `dsh.client.immediately === true`、页面是刷新后重新加载的（旧页面拿不到新的 client bundle） |
+| 按钮点了没反应 | `/__dsh-live-reload/state` 是否 200（`curl -H` 带 token 或看浏览器网络面板）；`refreshUi: never` 时按钮仍然可点，但不会自动刷新 |
+| 页面不自动刷新 | `refreshUi` 为 `auto` 时只在「没有输入框/可编辑区获得焦点」时自动刷新；`manual` 只点小圆点提示，需手动点按钮 |
 
 ## 10. 已验证
 
-在 headless profile（真实宿主进程，不是模拟宿主）里做过端到端验证：装入一个 `link:` 小白鼠插件
+**host 半边**：在 headless profile（真实宿主进程，不是模拟宿主）里做过端到端验证：装入一个 `link:` 小白鼠插件
 （`dsh-lr-victim`，模块级 `const VERSION`、每次求值生成随机 `LOAD_NONCE`）→ 它改写自己的源码 →
 热重载 → 再次调用它的工具：拿到的是**新版本号 + 新的模块加载随机数**，而进程 PID 不变（没有重启）。
 
@@ -183,3 +203,19 @@ lr_victim_version → version=3 nonce=wjfzpsm3 loadedAt=2026-10-15T09:20:47.742Z
 （`D:/test-dsh/experiments/lr-victim`）字面对不上，导致缓存清了 0 条、**报告成功但代码没换**。
 现在的四层匹配线索（前缀 / realpath / basename / 包名）与 `mode=bust` 兜底就是为此加的，
 `live_reload action=cache` 可以在真机上直接看到命中情况。
+
+**0.2.1 实机（本地 `dsh web` 测试台，真实宿主进程）**：
+
+```text
+GET /__dsh-live-reload/state
+→ 200 {"rev":0,…,"ui":{"mode":"auto","pollMs":1500,"path":"/__dsh-live-reload","enabled":true}}
+   ⟹ 延迟注入生效（0.1.0 用 ctx.get('webServer') 时这里是 404）
+
+页面 HTML 的 client 预加载批次里出现：…,dsh-live-reload/client.js,…&rev=32aa13e50aee
+批次响应 1,926,557 字节，含 conversation.session.header.utilities
+   ⟹ client half 被宿主发现并投递（dsh.client.immediately=true 生效）
+```
+
+**0.2.1 之前的版本没有 HTTP 端点**：旧写法在 `apply` 里 `ctx.get('webServer', false)` 拿到 `undefined`，
+路由与 index 注入都被 try/catch 静默吞掉。0.2.1 起改走 `ctx.inject(['webServer'])` + client half，
+这两个失败模式都已在测试里固定住（`界面：延迟注入后注册 prefix 路由`、`client half 真的能被模块表加载`）。

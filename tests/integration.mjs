@@ -170,9 +170,27 @@ function makeFakeHost({ pluginDir, profileDir, entryName = 'demo-plugin', extraE
         return () => {};
       },
     },
+    // 复刻 cordis 的延迟注入：依赖就绪后回调拿到 sub 上下文；sub.effect 立即执行并返回清理器。
+    inject(deps, callback) {
+      const sub = {
+        ...ctx,
+        webServer: deps.includes('webServer') ? webServer : undefined,
+        effect(fn) {
+          const dispose = fn();
+          return () => {
+            try {
+              dispose?.();
+            } catch {
+              /* ignore */
+            }
+          };
+        },
+      };
+      callback(sub);
+      return { dispose() {} };
+    },
     get(name) {
       if (name === 'loader') return loader;
-      if (name === 'webServer' || name === 'webserver') return webServer;
       return undefined;
     },
     provide(name, value) {
@@ -446,14 +464,11 @@ await test('start/stop：可暂停与恢复自动监视', async () => {
   await callTool(host, { action: 'stop' });
 });
 
-await test('界面：注册 prefix 路由、注入脚本、/state 返回 rev、/reload 触发重载', async () => {
-  assert.equal(host.webRoutes.length, 1);
+await test('界面：延迟注入后注册 prefix 路由、/state 返回 rev、/check 比对磁盘、/reload 触发重载', async () => {
+  assert.equal(host.webRoutes.length, 1, '应通过 ctx.inject 拿到 webServer 并注册一条路由');
   assert.equal(host.webRoutes[0].kind, 'prefix');
   assert.equal(host.webRoutes[0].path, '/__dsh-live-reload');
-  assert.equal(host.indexTaps.length, 1, '应注入 index.html 一段脚本');
-  const html = host.indexTaps[0]('<html><body><div id="app"></div></body></html>');
-  assert.ok(html.includes('__dsh-live-reload/state'), '注入脚本应轮询 /state');
-  assert.ok(html.indexOf('<script>') < html.indexOf('</body>'), '脚本应插在 </body> 之前');
+  assert.equal(host.indexTaps.length, 0, '不再注入 index.html（桌面壳静态直出，tapIndex 无效）');
 
   const state = makeReqRes('/__dsh-live-reload/state');
   host.webRoutes[0].handler(state.req, state.res);
@@ -461,6 +476,16 @@ await test('界面：注册 prefix 路由、注入脚本、/state 返回 rev、/
   assert.equal(state.captured.status, 200);
   assert.equal(typeof payload.rev, 'number');
   assert.ok(payload.rev >= 1, '之前的手动重载应推高 rev');
+  assert.equal(payload.ui.mode, 'auto');
+  assert.equal(payload.ui.enabled, true, '端点挂载后 ui.enabled 应为真');
+
+  host.events.length = 0;
+  const check = makeReqRes('/__dsh-live-reload/check');
+  host.webRoutes[0].handler(check.req, check.res);
+  const deadline0 = Date.now() + 3000;
+  while (Date.now() < deadline0 && !check.captured.body) await sleep(50);
+  assert.ok(check.captured.body, '/check 应有响应');
+  assert.equal(JSON.parse(check.captured.body).ok, true);
 
   host.events.length = 0;
   const reload = makeReqRes('/__dsh-live-reload/reload');
@@ -469,9 +494,13 @@ await test('界面：注册 prefix 路由、注入脚本、/state 返回 rev、/
   while (Date.now() < deadline && (!host.events.length || !reload.captured.body)) await sleep(50);
   assert.ok(host.events.length > 0, 'POST /reload 应触发一次重载');
   assert.equal(JSON.parse(reload.captured.body).ok, true);
+
+  const unknown = makeReqRes('/__dsh-live-reload/nope');
+  host.webRoutes[0].handler(unknown.req, unknown.res);
+  assert.equal(unknown.captured.status, 404);
 });
 
-await test('界面：refreshUi=never 时不挂路由也不注入', async () => {
+await test('界面：refreshUi=never 不注册路由', async () => {
   const silent = makeFakeHost({ pluginDir: space.pluginDir, profileDir: space.profileDir });
   const stop = apply(silent.ctx, { autoWatch: false, refreshUi: 'never' });
   await sleep(150);

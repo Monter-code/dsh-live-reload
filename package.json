@@ -1,8 +1,14 @@
 {
   "name": "dsh-live-reload",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
-  "description": "DSH 免重启热刷新插件：监视插件源码变化，重新加载 host 侧插件模块并刷新 Web 界面，让插件更新立刻生效，无需重启桌面端。",
+  "author": "Monter-code",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Monter-code/dsh-live-reload.git"
+  },
+  "homepage": "https://github.com/Monter-code/dsh-live-reload#readme",
+  "description": "DSH 免重启热刷新插件：监视插件源码变化，重新加载 host 侧插件模块，并在会话标题栏给出一颗「刷新界面」按钮，让插件更新立刻生效，无需重启桌面端。",
   "keywords": [
     "dsh",
     "dsh-plugin",
@@ -16,6 +22,7 @@
   "main": "lib/index.js",
   "exports": {
     ".": "./lib/index.js",
+    "./client": "./lib/client.js",
     "./package.json": "./package.json",
     "./locale/*.json": "./locale/*.json"
   },
@@ -30,7 +37,17 @@
   "dsh": {
     "bundle": {
       "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "immediately": true,
+      "inject": [
+        "@deepseek-ai/dsh-client-ui-conversation"
+      ]
     }
+  },
+  "engines": {
+    "dsh": ">=0.2.1-rc.1"
   },
   "license": "MIT"
 }

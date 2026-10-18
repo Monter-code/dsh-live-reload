@@ -8,17 +8,18 @@
  *  C. 重载内核：清模块缓存的边界、entry 匹配、以及最关键的「先删 registry 再 apply」
  *     顺序（顺序错了会被 Loader 把 entry 写成 disabled，插件从此不再加载）。
  *  D. 轮询监视器：首次基线不触发、变更才触发、去抖合批、换根目录重建基线。
- *  E. 界面刷新：rev 递增、注入脚本、index.html 注入位置。
+ *  E. 界面刷新：rev 递增、端点尾段解析、client half 的按钮契约。
  */
 import assert from 'node:assert/strict';
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { runInNewContext } from 'node:vm';
 
 import { describeEntry, isUnder, matchCacheKey, normalizePath, pickEntries, purgeModuleCaches, reloadEntry, resolveEntryFile, urlToPathSafe } from '../lib/reloader.mjs';
 import { collectWatchRoots, linkTargetsFromManifest, packageNameOf } from '../lib/roots.mjs';
 import { DEFAULT_IGNORE, diffSnapshots, diffRootSnapshots, scanRoot, scanRoots, shouldIgnore } from '../lib/snapshot.mjs';
-import { createUiState, injectIntoIndex, renderClientScript } from '../lib/ui.mjs';
+import { createUiState, tailOf } from '../lib/ui.mjs';
 import { createWatcher } from '../lib/watcher.mjs';
 
 let passed = 0;
@@ -485,22 +486,89 @@ await test('createUiState 每次 bump 递增 rev 并记录插件名', () => {
   assert.deepEqual(snap.items, [{ name: 'demo2' }]);
 });
 
-await test('renderClientScript 里含端点、轮询间隔与刷新模式', () => {
-  const script = renderClientScript({ path: '/__dsh-live-reload', pollMs: 1200, mode: 'auto' });
-  assert.ok(script.startsWith('<script>') && script.trimEnd().endsWith('</script>'));
-  assert.ok(script.includes('"/__dsh-live-reload/state"'));
-  assert.ok(script.includes('var POLL = 1200'));
-  assert.ok(script.includes('var MODE = "idle"'), 'auto 应归一化成 idle');
-  assert.ok(!script.includes('</script>\n<script'), '脚本内部不能出现提前闭合');
+await test('tailOf 只认端点前缀内的路径', () => {
+  assert.equal(tailOf('/__dsh-live-reload', '/__dsh-live-reload'), '');
+  assert.equal(tailOf('/__dsh-live-reload/', '/__dsh-live-reload'), '');
+  assert.equal(tailOf('/__dsh-live-reload/state', '/__dsh-live-reload'), '/state');
+  assert.equal(tailOf('/__dsh-live-reload/check?x=1', '/__dsh-live-reload'), '/check');
+  assert.equal(tailOf('/other/state', '/__dsh-live-reload'), null);
+  assert.equal(tailOf('/__dsh-live-reloadx/state', '/__dsh-live-reload'), null);
 });
 
-await test('injectIntoIndex 插到 </body> 前，没有 body 就追加', () => {
-  const script = '<script>x</script>';
-  const withBody = injectIntoIndex('<html><body><div/></body></html>', script);
-  assert.equal(withBody, `<html><body><div/>${script}\n</body></html>`);
-  const withoutBody = injectIntoIndex('<html><div/></html>', script);
-  assert.ok(withoutBody.endsWith(script));
-  assert.equal(injectIntoIndex('', script), '');
+await test('client half 声明了按钮契约（slot / id / order / inject / immediately）', async () => {
+  const source = await readFile(new URL('../lib/client.js', import.meta.url), 'utf8');
+  const pkg = JSON.parse(await readFile(new URL('../package.json', import.meta.url), 'utf8'));
+  assert.ok(source.includes("SLOT = 'conversation.session.header.utilities'"), '按钮注册在会话标题栏右侧');
+  assert.ok(source.includes("ENTRY_ID = 'dsh-live-reload:refresh'"));
+  assert.ok(source.includes('order: 30'), '排在 better-sidebar 的 10/20 之后');
+  assert.ok(source.includes('exports.inject = [\'slots\']'));
+  assert.ok(source.includes('window.__ModuleLoader__.load('));
+  assert.ok(source.includes("id: 'dsh-live-reload'"), '模块 id 必须是包名');
+  assert.equal(pkg.exports['./client'], './lib/client.js');
+  assert.equal(pkg.dsh.client.platform, 'web');
+  assert.equal(pkg.dsh.client.immediately, true, '惰性模块表要求 immediately=true');
+  assert.ok(source.includes("endpoint('/check')"), '点击时先让 host 比对磁盘');
+  assert.ok(source.includes('window.location.reload()'), '页面刷新只能由页面自己发起');
+});
+
+await test('client half 真的能被模块表加载：apply 注册按钮、渲染出 button', async () => {
+  const source = await readFile(new URL('../lib/client.js', import.meta.url), 'utf8');
+  let registration = null;
+  const sandbox = {
+    window: { __ModuleLoader__: { load: (value) => { registration = value; } } },
+    fetch: async () => ({ ok: false }),
+    document: { activeElement: null, querySelectorAll: () => [] },
+    console,
+    setTimeout,
+    clearTimeout,
+  };
+  runInNewContext(source, sandbox);
+  assert.ok(registration, 'lib/client.js 必须调用 window.__ModuleLoader__.load');
+  assert.equal(registration.id, 'dsh-live-reload', '模块 id 必须是包名');
+  assert.equal(typeof registration.factory, 'function');
+
+  const React = {
+    createElement: (type, props, ...children) => ({ type, props: props ?? {}, children }),
+    useState: (initial) => [initial, () => {}],
+    useRef: (initial) => ({ current: initial }),
+    useCallback: (fn) => fn,
+    useEffect: () => {},
+  };
+  const exportsObject = registration.factory((specifier) => {
+    if (specifier === 'react') return React;
+    throw new Error(`unexpected require(${specifier})`);
+  });
+  assert.equal(typeof exportsObject.apply, 'function');
+  // vm 里的数组来自另一个 realm，deepStrictEqual 会因原型不同而失败，这里按值比较。
+  assert.equal(exportsObject.inject.join(','), 'slots');
+
+  const registrations = [];
+  const ctx = {
+    slots: {
+      inject(name, factory) {
+        const iterator = factory();
+        const next = iterator.next();
+        registrations.push({ name, options: next.value, done: next.done });
+        return () => {};
+      },
+      register: (options, component) => ({ ...options, component }),
+    },
+  };
+  exportsObject.apply(ctx);
+  assert.equal(registrations.length, 1);
+  assert.equal(registrations[0].name, 'conversation.session.header.utilities');
+  assert.equal(registrations[0].options.id, 'dsh-live-reload:refresh');
+  assert.equal(registrations[0].options.order, 30);
+  assert.equal(registrations[0].done, false, 'generator 应等待注册项作为 yield 值');
+
+  const Component = registrations[0].options.component;
+  assert.equal(typeof Component, 'function', '注册项要带上组件');
+  const element = Component({});
+  assert.equal(element.type, 'button');
+  assert.equal(element.props['data-dsh-live-reload'], 'refresh');
+  assert.equal(element.props['aria-label'], '刷新界面');
+  assert.equal(element.props.title.includes('刷新界面'), true);
+  assert.equal(typeof element.props.onClick, 'function', '按钮要能点');
 });
 
 for (const dir of tempDirs) {
